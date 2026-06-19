@@ -1,7 +1,6 @@
 import {
   Observable,
   Subject,
-  combineLatest,
   forkJoin,
   from,
   map,
@@ -92,7 +91,7 @@ export class PseudoService {
       "identify",
       this.batchService.initBatch<Value>(
         "identify",
-        (items) => this.fromAsn1CompressedMultipleValues(items),
+        (items) => this.identifyMultipleValues(items),
         this.destroy$,
       ),
     );
@@ -110,7 +109,9 @@ export class PseudoService {
       "byteArrayIdentify",
       this.batchService.initBatch<Value>(
         "byteArrayIdentify",
-        (items) => this.byteArrayFromAsn1CompressedMultipleValues(items),
+        // byteArrayFromAsn1CompressedMultipleValues was identical to
+        // fromAsn1CompressedMultipleValues — reuse the shared implementation.
+        (items) => this.identifyMultipleValues(items),
         this.destroy$,
       ),
     );
@@ -150,6 +151,10 @@ export class PseudoService {
       throw new Error("Invalid pseudo configuration");
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Public API — string
+  // ---------------------------------------------------------------------------
 
   /**
    * Pseudonymizes a string value.
@@ -213,12 +218,49 @@ export class PseudoService {
                 tap(([p, e]) =>
                   this.pseudoCacheService.cacheValue(str, p, e ?? undefined),
                 ),
-                map(([p, e]) => p.asString()),
+                map(([p]) => p.asString()),
               ),
         ),
       ),
     );
   }
+
+  /**
+   * Pseudonymizes multiple values in batches.
+   *
+   * Values are automatically chunked before being sent to the
+   * underlying helper.
+   *
+   * @param str Values to pseudonymize.
+   * @returns Observable emitting pseudonymized values.
+   */
+  toAsn1CompressedMultiple(str: string[]): Observable<string[]> {
+    if (str.length === 0) {
+      return of([]);
+    }
+    return this.toAsn1CompressedMultipleInTransit(str).pipe(
+      map((i) => i.map((v) => v.asShortString())),
+    );
+  }
+
+  /**
+   * Identifies multiple pseudonyms in batches.
+   *
+   * @param str ASN.1 compressed pseudonyms.
+   * @returns Observable emitting original values.
+   */
+  fromAsn1CompressedMultiple(str: string[]): Observable<string[]> {
+    if (str.length === 0) {
+      return of([]);
+    }
+    return this.identifyMultipleValues(str).pipe(
+      map((i) => i.map((v) => v.asString())),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Public API — byte arrays
+  // ---------------------------------------------------------------------------
 
   /**
    * Pseudonymizes a byte array.
@@ -274,18 +316,48 @@ export class PseudoService {
             ? of(cached.asBytes())
             : this.toPseudonymInTransit(str).pipe(
                 switchMap((psd) =>
-                  combineLatest([
-                    this.batchService.process<Value>(str, "byteArrayIdentify"),
-                    of(this.expiresIn(psd)),
-                  ]),
+                  this.batchService
+                    .process<Value>(str, "byteArrayIdentify")
+                    .pipe(map((p) => [p, this.expiresIn(psd)] as const)),
                 ),
                 tap(([p, e]) => this.pseudoCacheService.cacheValue(str, p, e)),
-                map(([p, e]) => p.asBytes()),
+                map(([p]) => p.asBytes()),
               ),
         ),
       ),
     );
   }
+
+  /**
+   * Pseudonymizes multiple byte arrays in batches.
+   *
+   * @param byteArrays Values to pseudonymize.
+   * @returns Observable emitting pseudonymized values.
+   */
+  byteArraytoAsn1CompressedMultiple(
+    byteArrays: Uint8Array[],
+  ): Observable<string[]> {
+    return this.byteArraytoAsn1CompressedMultipleInTransit(byteArrays).pipe(
+      map((i) => i.map((v) => v.asShortString())),
+    );
+  }
+
+  /**
+   * Identifies multiple pseudonyms and returns their original
+   * byte array representations.
+   *
+   * @param str ASN.1 compressed pseudonyms.
+   * @returns Observable emitting decoded byte arrays.
+   */
+  byteArrayFromAsn1CompressedMultiple(str: string[]): Observable<Uint8Array[]> {
+    return this.identifyMultipleValues(str).pipe(
+      map((i) => i.map((v) => v.asBytes())),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Public API — expiration
+  // ---------------------------------------------------------------------------
 
   /**
    * Checks whether a pseudonym has expired according to its transit
@@ -305,23 +377,70 @@ export class PseudoService {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Lifecycle
+  // ---------------------------------------------------------------------------
+
   /**
-   * Pseudonymizes multiple values in batches.
+   * Stops all internal processing pipelines and releases resources.
    *
-   * Values are automatically chunked before being sent to the
-   * underlying helper.
-   *
-   * @param str Values to pseudonymize.
-   * @returns Observable emitting pseudonymized values.
+   * Should be called when the service is no longer needed.
    */
-  toAsn1CompressedMultiple(str: string[]): Observable<string[]> {
-    if (str.length === 0) {
-      return of([]);
-    }
-    return this.toAsn1CompressedMultipleInTransit(str).pipe(
-      map((i) => i.map((v) => v.asShortString())),
+  onDestroy() {
+    this.destroy$.next();
+    this.destroy$.complete();
+    this.pipelines.clear();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private helpers — error checking
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Asserts that none of the items in the array is an EHealthProblem,
+   * throwing a TypeError on the first one found.
+   *
+   * Replaces the six identical inline map + instanceof guards that existed
+   * in the original code.
+   *
+   * @param items Mixed array of results and potential problems.
+   * @returns Narrowed array guaranteed to contain no EHealthProblem.
+   */
+  private assertNotProblem<T>(items: Array<T | EHealthProblem>): T[] {
+    return items.map((i) => {
+      if (i instanceof EHealthProblem) {
+        throw new TypeError(i.title, { cause: i.detail });
+      }
+      return i as T;
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private helpers — point extraction
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Extracts all points from a batch response object that exposes
+   * `lengthPoints()` and `getPoint(index)`.
+   *
+   * Replaces the duplicate `getValues` / `getPoints` methods from the
+   * original code with a single generic implementation.
+   *
+   * @param batch Batch response from the pseudonymization helper.
+   * @returns Flat array of points (may include EHealthProblem entries).
+   */
+  private extractPoints<T>(batch: {
+    lengthPoints(): number;
+    getPoint(index: number): T | EHealthProblem;
+  }): Array<T | EHealthProblem> {
+    return Array.from({ length: batch.lengthPoints() }, (_, i) =>
+      batch.getPoint(i),
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // Private helpers — batch pseudonymization
+  // ---------------------------------------------------------------------------
 
   /**
    * Converts a collection of values into pseudonyms using batch processing.
@@ -338,83 +457,14 @@ export class PseudoService {
       return of([]);
     }
     const slices = [...arrayChunks(str, 10)];
-    return forkJoin([
-      ...slices.map((slice) =>
+    return forkJoin(
+      slices.map((slice) =>
         this.toValues(slice).pipe(
           switchMap((val) => this.pseudonymizeMultiple(val)),
-          map((p) => this.getValues(p)),
-          map((p) =>
-            p.map((i) => {
-              if (i instanceof EHealthProblem) {
-                throw new TypeError(i.title, { cause: i.detail });
-              }
-              return i;
-            }),
-          ),
+          map((p) => this.assertNotProblem(this.extractPoints(p))),
         ),
       ),
-    ]).pipe(map((r) => r?.flat() || []));
-  }
-
-  /**
-   * Identifies multiple pseudonyms in batches.
-   *
-   * @param str ASN.1 compressed pseudonyms.
-   * @returns Observable emitting original values.
-   */
-  fromAsn1CompressedMultiple(str: string[]): Observable<string[]> {
-    if (str.length === 0) {
-      return of([]);
-    }
-    return this.fromAsn1CompressedMultipleValues(str).pipe(
-      map((i) => i.map((v) => v.asString())),
-    );
-  }
-
-  /**
-   * Converts a collection of pseudonyms back to values using batch
-   * processing.
-   *
-   * Pseudonyms are automatically chunked to limit request size.
-   *
-   * @param str ASN.1 compressed pseudonyms.
-   * @returns Observable emitting resolved values.
-   */
-  private fromAsn1CompressedMultipleValues(str: string[]): Observable<Value[]> {
-    if (str.length === 0) {
-      return of([]);
-    }
-    const slices = [...arrayChunks(str, 10)];
-    return forkJoin([
-      ...slices.map((slice) =>
-        this.toPseudonymsInTransit(slice).pipe(
-          switchMap((psd) => this.identifyMultiple(psd)),
-          map((p) => this.getPoints(p)),
-          map((p) =>
-            p.map((i) => {
-              if (i instanceof EHealthProblem) {
-                throw new TypeError(i.title, { cause: i.detail });
-              }
-              return i;
-            }),
-          ),
-        ),
-      ),
-    ]).pipe(map((r) => r?.flat() || []));
-  }
-
-  /**
-   * Pseudonymizes multiple byte arrays in batches.
-   *
-   * @param byteArrays Values to pseudonymize.
-   * @returns Observable emitting pseudonymized values.
-   */
-  byteArraytoAsn1CompressedMultiple(
-    byteArrays: Uint8Array[],
-  ): Observable<string[]> {
-    return this.byteArraytoAsn1CompressedMultipleInTransit(byteArrays).pipe(
-      map((i) => i.map((v) => v.asShortString())),
-    );
+    ).pipe(map((r) => r.flat()));
   }
 
   /**
@@ -432,22 +482,14 @@ export class PseudoService {
       return of([]);
     }
     const slices = [...arrayChunks(byteArrays, 10)];
-    return forkJoin([
-      ...slices.map((slice) =>
+    return forkJoin(
+      slices.map((slice) =>
         this.byteArraysToValues(slice).pipe(
           switchMap((val) => this.pseudonymizeMultiple(val)),
-          map((p) => this.getValues(p)),
-          map((p) =>
-            p.map((i) => {
-              if (i instanceof EHealthProblem) {
-                throw new TypeError(i.title, { cause: i.detail });
-              }
-              return i;
-            }),
-          ),
+          map((p) => this.assertNotProblem(this.extractPoints(p))),
         ),
       ),
-    ]).pipe(map((r) => r?.flat() || []));
+    ).pipe(map((r) => r.flat()));
   }
 
   /**
@@ -463,71 +505,40 @@ export class PseudoService {
     return this.byteArraytoAsn1CompressedMultipleInTransit(byteArrays);
   }
 
+  // ---------------------------------------------------------------------------
+  // Private helpers — batch identification
+  // ---------------------------------------------------------------------------
+
   /**
-   * Identifies multiple pseudonyms and returns their original
-   * byte array representations.
+   * Converts a collection of pseudonyms back to values using batch processing.
+   *
+   * This single method replaces the two previously duplicate private methods
+   * `fromAsn1CompressedMultipleValues` and
+   * `byteArrayFromAsn1CompressedMultipleValues`, which were strictly identical.
+   *
+   * Pseudonyms are automatically chunked to limit request size.
    *
    * @param str ASN.1 compressed pseudonyms.
-   * @returns Observable emitting decoded byte arrays.
+   * @returns Observable emitting resolved Value objects.
    */
-  byteArrayFromAsn1CompressedMultiple(str: string[]): Observable<Uint8Array[]> {
-    return this.byteArrayFromAsn1CompressedMultipleValues(str).pipe(
-      map((i) => i.map((v) => v.asBytes())),
-    );
-  }
-
-  private byteArrayFromAsn1CompressedMultipleValues(
-    str: string[],
-  ): Observable<Value[]> {
+  private identifyMultipleValues(str: string[]): Observable<Value[]> {
     if (str.length === 0) {
       return of([]);
     }
     const slices = [...arrayChunks(str, 10)];
-    return forkJoin([
-      ...slices.map((slice) =>
+    return forkJoin(
+      slices.map((slice) =>
         this.toPseudonymsInTransit(slice).pipe(
           switchMap((psd) => this.identifyMultiple(psd)),
-          map((p) => this.getPoints(p)),
-          map((p) =>
-            p.map((i) => {
-              if (i instanceof EHealthProblem) {
-                throw new TypeError(i.title, { cause: i.detail });
-              }
-              return i;
-            }),
-          ),
+          map((p) => this.assertNotProblem(this.extractPoints(p))),
         ),
       ),
-    ]).pipe(map((r) => r?.flat() || []));
+    ).pipe(map((r) => r.flat()));
   }
 
-  /**
-   * Extracts all pseudonym points from a batch response.
-   *
-   * @param p Batch pseudonym response.
-   * @returns Flat array of pseudonym points.
-   */
-  private getValues(p: MultiplePseudonymInTransit) {
-    const points: Array<PseudonymInTransit | EHealthProblem> = [];
-    for (let index = 0; index < p.lengthPoints(); index++) {
-      points.push(p.getPoint(index));
-    }
-    return points;
-  }
-
-  /**
-   * Extracts all value points from a batch response.
-   *
-   * @param p Batch value response.
-   * @returns Flat array of value points.
-   */
-  private getPoints(p: MultipleValue) {
-    const points: Array<Value | EHealthProblem> = [];
-    for (let index = 0; index < p.lengthPoints(); index++) {
-      points.push(p.getPoint(index));
-    }
-    return points;
-  }
+  // ---------------------------------------------------------------------------
+  // Private helpers — single item wrappers
+  // ---------------------------------------------------------------------------
 
   /**
    * Pseudonymizes a single value.
@@ -601,6 +612,10 @@ export class PseudoService {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Private helpers — value / pseudonym factories
+  // ---------------------------------------------------------------------------
+
   /**
    * Creates a Value instance from a string.
    *
@@ -619,7 +634,6 @@ export class PseudoService {
    */
   private toValues(str: string[]): Observable<MultipleValue> {
     const multipleValue = this.pseudonymisationDomain.valueFactory.multiple();
-
     str.forEach((i) =>
       multipleValue.pushPoint(
         this.pseudonymisationDomain.valueFactory.fromString(i),
@@ -637,6 +651,7 @@ export class PseudoService {
   private byteArrayToValue(str: Uint8Array): Observable<Value> {
     return of(this.pseudonymisationDomain.valueFactory.fromArray(str));
   }
+
   /**
    * Creates a batch Value collection from byte arrays.
    *
@@ -645,13 +660,11 @@ export class PseudoService {
    */
   private byteArraysToValues(str: Uint8Array[]): Observable<MultipleValue> {
     const multipleValue = this.pseudonymisationDomain.valueFactory.multiple();
-
     str.forEach((i) =>
       multipleValue.pushPoint(
         this.pseudonymisationDomain.valueFactory.fromArray(i),
       ),
     );
-
     return of(multipleValue);
   }
 
@@ -699,11 +712,18 @@ export class PseudoService {
     return of(multiplePseudonymInTransit);
   }
 
+  // ---------------------------------------------------------------------------
+  // Private helpers — TTL computation
+  // ---------------------------------------------------------------------------
+
   /**
    * Computes the cache TTL from pseudonym expiration information.
    *
    * Expiration data is extracted from the transit headers when available,
    * otherwise from the token payload.
+   *
+   * re-encodes the already-Base64 payload instead of decoding it.
+   * The correct call is `Base64.decode(payload)`.
    *
    * @param pseudonym Pseudonym to inspect.
    * @returns Remaining cache duration in milliseconds or undefined.
@@ -721,8 +741,7 @@ export class PseudoService {
         if (!payload) {
           return undefined;
         }
-
-        expiresAt = JSON.parse(Base64.fromBase64(payload))?.exp;
+        expiresAt = JSON.parse(Base64.decode(payload))?.exp;
       } else {
         expiresAt = Number(expHeader);
       }
@@ -735,16 +754,5 @@ export class PseudoService {
     } catch {
       return undefined;
     }
-  }
-
-  /**
-   * Stops all internal processing pipelines and releases resources.
-   *
-   * Should be called when the service is no longer needed.
-   */
-  onDestroy() {
-    this.destroy$.next();
-    this.destroy$.complete();
-    this.pipelines.clear();
   }
 }

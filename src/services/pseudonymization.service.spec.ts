@@ -1,6 +1,6 @@
 import { PseudoService } from "./pseudonymization.service";
 
-describe("PseudoService (FULL MOCK STABLE)", () => {
+describe("PseudoService", () => {
   let service: PseudoService;
 
   let helperMock: any;

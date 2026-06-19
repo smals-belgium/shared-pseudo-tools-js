@@ -13,9 +13,9 @@ import { PseudoConfig } from "../interfaces/pseudo-config.interface";
  * or overridden per entry.
  */
 export class PseudoCacheService {
-  private readonly config: PseudoConfig["cache"];
+  private static readonly DEFAULT_TTL_MS = 10_000;
 
-  private readonly DEFAULT_TTL_MS = 10000;
+  private readonly config: PseudoConfig["cache"];
 
   private readonly pseudonymCache: TTLCache<string, PseudonymInTransit>;
   private readonly valueCache: TTLCache<string, Value>;
@@ -41,20 +41,43 @@ export class PseudoCacheService {
   /**
    * Resolves the effective TTL for a cache entry.
    *
-   * Priority order:
+   * Resolution order:
    * 1. Entry-specific TTL
-   * 2. Cache configuration TTL
+   * 2. Cache-level configured TTL
    * 3. Default TTL
    *
-   * @param cacheTTL TTL provided for the current entry.
-   * @param configTTL TTL configured for the cache.
-   * @returns TTL value in milliseconds.
+   * @param entryTTL TTL provided for the current cache entry.
+   * @param cacheTTL TTL configured for the cache instance.
+   * @returns The effective TTL in milliseconds.
    */
   private resolveTtl(
+    entryTTL: number | undefined,
     cacheTTL: number | undefined,
-    configTTL: number | undefined,
   ): number {
-    return cacheTTL ?? configTTL ?? this.DEFAULT_TTL_MS;
+    return entryTTL ?? cacheTTL ?? PseudoCacheService.DEFAULT_TTL_MS;
+  }
+
+  /**
+   * Stores a value in the specified cache using the resolved TTL.
+   *
+   * @typeParam K Cache key type.
+   * @typeParam V Cache value type.
+   * @param cache Target cache instance.
+   * @param key Cache key.
+   * @param value Value to store.
+   * @param entryTTL Optional entry-specific TTL.
+   * @param cacheTTL Cache-level TTL configuration.
+   */
+  private setWithTtl<K, V>(
+    cache: TTLCache<K, V>,
+    key: K,
+    value: V,
+    entryTTL: number | undefined,
+    cacheTTL: number | undefined,
+  ): void {
+    cache.set(key, value, {
+      ttl: this.resolveTtl(entryTTL, cacheTTL),
+    });
   }
 
   /**
@@ -65,16 +88,20 @@ export class PseudoCacheService {
    * @param cacheTTL Optional entry-specific TTL in milliseconds.
    */
   cacheValue(pseudonym: string, value: Value, cacheTTL?: number): void {
-    const ttl = this.resolveTtl(cacheTTL, this.config?.values?.ttl);
-
-    this.valueCache.set(pseudonym, value, { ttl });
+    this.setWithTtl(
+      this.valueCache,
+      pseudonym,
+      value,
+      cacheTTL,
+      this.config?.values?.ttl,
+    );
   }
 
   /**
    * Retrieves a cached value from its pseudonym.
    *
    * @param pseudonym ASN.1 compressed pseudonym.
-   * @returns The cached value if available and not expired.
+   * @returns The cached value if present and not expired; otherwise undefined.
    */
   getValue(pseudonym: string): Value | undefined {
     return this.valueCache.get(pseudonym);
@@ -83,7 +110,7 @@ export class PseudoCacheService {
   /**
    * Stores a pseudonym associated with a clear value.
    *
-   * @param value Original value.
+   * @param value Original clear value.
    * @param pseudonym Generated pseudonym.
    * @param cacheTTL Optional entry-specific TTL in milliseconds.
    */
@@ -92,16 +119,20 @@ export class PseudoCacheService {
     pseudonym: PseudonymInTransit,
     cacheTTL?: number,
   ): void {
-    const ttl = this.resolveTtl(cacheTTL, this.config?.pseudonyms?.ttl);
-
-    this.pseudonymCache.set(value, pseudonym, { ttl });
+    this.setWithTtl(
+      this.pseudonymCache,
+      value,
+      pseudonym,
+      cacheTTL,
+      this.config?.pseudonyms?.ttl,
+    );
   }
 
   /**
    * Retrieves a cached pseudonym from its original value.
    *
-   * @param value Original value.
-   * @returns The cached pseudonym if available and not expired.
+   * @param value Original clear value.
+   * @returns The cached pseudonym if present and not expired; otherwise undefined.
    */
   getPseudonym(value: string): PseudonymInTransit | undefined {
     return this.pseudonymCache.get(value);

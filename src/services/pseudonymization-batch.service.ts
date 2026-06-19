@@ -1,89 +1,80 @@
 import {
   bufferTime,
   catchError,
+  EMPTY,
   filter,
+  finalize,
   map,
   mergeMap,
   Observable,
+  shareReplay,
   Subject,
+  takeLast,
   takeUntil,
   tap,
-  EMPTY,
 } from "rxjs";
 import { Pipeline } from "../interfaces/pipeline.interface";
 
 /**
- * Represents a batch of queued items and their associated response subjects.
- */
-type BatchRequest = {
-  items: string[];
-  resolve: Map<string, Subject<any>>;
-};
-
-/**
- * Provides request batching capabilities for pseudonymization and identification
- * operations.
+ * Service used to aggregate multiple single-item requests
+ * into a single batch request.
  *
- * Requests received within a short time window are grouped together and
- * processed in a single batch call. Results are then dispatched back to the
- * individual request observables.
+ * Calls to {@link process} made within a 300 ms window
+ * (or up to 10 items) are grouped together and passed
+ * to the handler registered through {@link initBatch}.
  */
 export class PseudoBatchService {
   private readonly pipelines = new Map<string, Pipeline>();
 
   /**
-   * Creates and initializes a batching pipeline.
+   * Initializes a batch processing pipeline.
    *
-   * Requests are buffered for up to 300 milliseconds or until 50 items are
-   * accumulated, whichever comes first.
-   *
-   * @param name Unique pipeline name.
-   * @param handler Function responsible for processing a batch of items.
-   * @param destroy$ Observable used to stop and clean up the pipeline.
-   * @returns The internal queue used to receive items.
+   * @param name Unique pipeline identifier.
+   * @param handler Function invoked with the batched items.
+   * @param destroy$ Observable used to terminate the pipeline.
+   * @returns The internal queue associated with the pipeline.
    */
   initBatch<T = any>(
     name: string,
-    handler: (items: string[]) => Observable<any[]>,
+    handler: (items: string[]) => Observable<T[]>,
     destroy$: Subject<void>,
-  ) {
+  ): Subject<string> {
     const queue = new Subject<string>();
-
     const subjects = new Map<string, Subject<T>>();
-    const batch$ = new Subject<BatchRequest>();
-
-    batch$
-      .pipe(
-        mergeMap(({ items, resolve }) =>
-          handler(items).pipe(
-            tap((results) => {
-              this.dispatchBatchResults(items, resolve, results);
-            }),
-            catchError((err) => {
-              // fail whole batch safely
-              items.forEach((item) => {
-                resolve.get(item)?.error(err);
-                resolve.delete(item);
-              });
-              return EMPTY;
-            }),
-          ),
-        ),
-        takeUntil(destroy$),
-      )
-      .subscribe();
 
     queue
       .pipe(
         filter(Boolean),
-        bufferTime(300, undefined, 50),
+        bufferTime(300, undefined, 10),
         filter((items) => items.length > 0),
-        map((items) => Array.from(new Set(items))),
-        map((items) => ({
-          items,
-          resolve: new Map(items.map((i) => [i, subjects.get(i)!])),
-        })),
-        tap((batch) => batch$.next(batch)),
+
+        // Prevent duplicate items from being sent
+        // within the same batch.
+        map((items) => [...new Set(items)]),
+
+        mergeMap((items) =>
+          handler(items).pipe(
+            tap((results) =>
+              this.dispatchBatchResults<T>(items, subjects, results),
+            ),
+
+            // A handler error should not permanently
+            // terminate the pipeline.
+            catchError((error) => {
+              items.forEach((item) => {
+                const subject = subjects.get(item);
+
+                if (subject) {
+                  subject.error(error);
+                  subjects.delete(item);
+                }
+              });
+
+              return EMPTY;
+            }),
+          ),
+        ),
+
         takeUntil(destroy$),
       )
       .subscribe();
@@ -98,26 +89,26 @@ export class PseudoBatchService {
   }
 
   /**
-   * Dispatches batch results back to the original request subjects.
+   * Dispatches batch results to the corresponding subscribers.
    *
-   * Each result is matched to its corresponding item using the position within
-   * the batch response.
-   *
-   * @param items Original batch items.
-   * @param subjects Subjects awaiting results.
-   * @param results Results returned by the batch handler.
+   * Results are matched by index:
+   * `results[index]` corresponds to `items[index]`.
    */
   private dispatchBatchResults<T>(
     items: string[],
     subjects: Map<string, Subject<T>>,
     results: T[],
-  ) {
+  ): void {
     items.forEach((item, index) => {
       const subject = subjects.get(item);
-      if (!subject) return;
+
+      if (!subject) {
+        return;
+      }
 
       const result = results?.[index];
 
+      // Accept falsy values such as 0, false or "".
       if (result !== undefined) {
         subject.next(result);
       }
@@ -128,22 +119,28 @@ export class PseudoBatchService {
   }
 
   /**
-   * Queues an item for batch processing.
+   * Queues an item for processing within the specified pipeline.
    *
-   * Multiple requests for the same item share the same observable result until
-   * the batch has been processed.
+   * If multiple requests for the same item are received before
+   * the batch is executed, only one request is sent and the
+   * resulting value is shared across all subscribers.
    *
-   * @param item Item to process.
+   * @param item Item identifier to process.
    * @param pipelineName Target pipeline name.
-   * @returns Observable emitting the processed result.
-   * @throws Error when the specified pipeline does not exist.
+   * @returns An observable emitting the associated result.
    */
   process<T = any>(item: string, pipelineName: string): Observable<T> {
     const pipeline = this.pipelines.get(pipelineName);
-    if (!pipeline) throw new Error(`Pipeline not found: ${pipelineName}`);
+
+    if (!pipeline) {
+      throw new Error(`Pipeline not found: ${pipelineName}`);
+    }
 
     const cached = pipeline.cache.get(item);
-    if (cached) return cached as Observable<T>;
+
+    if (cached) {
+      return cached;
+    }
 
     let subject = pipeline.subjects.get(item);
 
@@ -153,15 +150,26 @@ export class PseudoBatchService {
       pipeline.queue.next(item);
     }
 
-    const out$ = subject.asObservable();
+    const out$ = subject.asObservable().pipe(
+      filter((value): value is T => value !== undefined),
 
-    const final$ = out$.pipe(
-      filter((v) => v !== undefined && v !== null),
-      map((v) => v as T),
+      // The subject emits a single value before completion.
+      takeLast(1),
+
+      // Remove the cache entry once processing completes.
+      finalize(() => {
+        pipeline.cache.delete(item);
+      }),
+
+      // Share the result across concurrent subscribers.
+      shareReplay({
+        bufferSize: 1,
+        refCount: true,
+      }),
     );
 
-    pipeline.cache.set(item, final$);
+    pipeline.cache.set(item, out$);
 
-    return final$;
+    return out$;
   }
 }

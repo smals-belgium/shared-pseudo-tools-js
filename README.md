@@ -3,7 +3,6 @@
 ![npm](https://img.shields.io/npm/v/%40smals-belgium/shared-pseudo-tools-js)
 ![license](https://img.shields.io/npm/l/%40smals-belgium/shared-pseudo-tools-js)
 ![build](https://img.shields.io/github/actions/workflow/status/smals-belgium/shared-pseudo-tools-js/nodejs.yml?branch=master)
-![release](https://img.shields.io/github/actions/workflow/status/smals-belgium/shared-pseudo-tools-js/release.yml?branch=master)
 
 Reactive pseudonymization toolkit built on top of `@smals-belgium-shared/pseudo-helper`.
 
