@@ -4,578 +4,313 @@
 ![license](https://img.shields.io/npm/l/%40smals-belgium/shared-pseudo-tools-js)
 ![build](https://img.shields.io/github/actions/workflow/status/smals-belgium/shared-pseudo-tools-js/nodejs.yml?branch=master)
 
-Reactive pseudonymization toolkit built on top of `@smals-belgium-shared/pseudo-helper`.
+Framework-agnostic reactive pseudonymization toolkit built on top of `@smals-belgium-shared/pseudo-helper`.
 
-This library provides:
-
-- Simple pseudonymization / identification APIs
-- Batch processing
-- Automatic request aggregation
-- In-memory caching with TTL
-- Queue management to avoid duplicate concurrent requests
-- RxJS-based reactive API
+The library exposes a small RxJS-based API for pseudonymization and identification, with built-in batching, in-flight request deduplication, TTL caching and `Uint8Array` support.
 
 ---
 
-# Features
+## Features
 
-## Pseudonymization
-
-Convert a value into a pseudonym.
-
-```ts
-pseudoService.toAsn1Compressed("12345678901");
-```
-
-## Identification
-
-Convert a pseudonym back into its original value.
-
-```ts
-pseudoService.fromAsn1Compressed(pseudonym);
-```
-
-## Batch Processing
-
-Multiple requests are automatically grouped into batches.
-
-```ts
-pseudoService.toAsn1CompressedMultiple(["123", "456", "789"]);
-```
-
-## Byte Array Support
-
-Pseudonymize binary content.
-
-```ts
-pseudoService.byteArraytoAsn1Compressed(bytes);
-```
-
-Restore original binary content.
-
-```ts
-pseudoService.byteArrayFromAsn1Compressed(pseudonym);
-```
-
-## Smart Caching
-
-The library automatically caches:
-
-- Value → Pseudonym
-- Pseudonym → Value
-
-using TTL-based storage.
-
-## Request Deduplication
-
-Multiple simultaneous requests for the same value only trigger a single underlying pseudonymization operation.
-
-## Automatic Batching
-
-Requests received within a configurable time window are automatically aggregated into a single batch request.
+- String pseudonymization and identification
+- Batch pseudonymization and batch identification
+- Binary data support through `Uint8Array`
+- Automatic batching of concurrent requests
+- In-flight deduplication for identical keys
+- TTL-based in-memory caching
+- Expiration check for ASN.1 compressed pseudonyms
+- Framework-agnostic implementation, usable from Angular, Node-compatible build tools, or any TypeScript project using RxJS
 
 ---
 
-# Installation
+## Installation
 
 ```bash
 npm install @smals-belgium/shared-pseudo-tools-js
 ```
 
----
-
-# Peer Dependency
-
-This package relies on:
+Install the underlying pseudonymization helper expected by the library:
 
 ```bash
 npm install @smals-belgium-shared/pseudo-helper
 ```
 
+The package uses RxJS observables. Make sure your consuming project has a compatible RxJS setup.
+
 ---
 
-# Quick Start
-
-## Import
+## Quick start
 
 ```ts
 import { PseudoService } from "@smals-belgium/shared-pseudo-tools-js";
-
 import { PseudonymisationHelper } from "@smals-belgium-shared/pseudo-helper";
-```
 
-## Create Helper
+const helper = new PseudonymisationHelper("https://pseudo.example.be");
 
-```ts
-const helper = new PseudonymisationHelper("https://my-pseudonymization-server");
-```
-
-## Create Service
-
-```ts
-const service = new PseudoService(helper, {
+const pseudoService = new PseudoService(helper, {
   domain: "patient",
   curve: "secp256k1",
   audience: "consumer",
   bufferSize: 100,
+  cache: {
+    values: { ttl: 300_000 },
+    pseudonyms: { ttl: 300_000 },
+  },
+});
+
+pseudoService.toAsn1Compressed("12345678901").subscribe((pseudonym) => {
+  console.log(pseudonym);
 });
 ```
 
 ---
 
-# Configuration
+## Configuration
 
 ```ts
-interface PseudoConfig {
+import type { TTLCacheOptions } from "@isaacs/ttlcache";
+import type {
+  PseudonymInTransit,
+  Value,
+} from "@smals-belgium-shared/pseudo-helper";
+
+export interface PseudoConfig {
   endpoint?: string;
   domain?: string;
   curve?: string;
   audience?: string;
   bufferSize?: number;
-
   cache?: {
     values?: TTLCacheOptions<string, Value>;
-
     pseudonyms?: TTLCacheOptions<string, PseudonymInTransit>;
   };
 }
 ```
 
-## Configuration Example
+### Required values
+
+The constructor validates that the following values are present:
+
+- `domain`
+- `curve`
+- `audience`
+- `bufferSize`
+
+`endpoint` is kept in the configuration interface for compatibility, but the current service expects the `PseudonymisationHelper` instance to be provided by the caller.
+
+### Cache TTL
+
+The cache uses milliseconds.
 
 ```ts
 const config = {
   domain: "patient",
-
   curve: "secp256k1",
-
   audience: "consumer",
-
   bufferSize: 100,
-
   cache: {
-    values: {
-      ttl: 300000,
-    },
-
-    pseudonyms: {
-      ttl: 300000,
-    },
+    values: { ttl: 300_000 },
+    pseudonyms: { ttl: 300_000 },
   },
 };
 ```
 
----
+If no TTL is configured, the internal default is `10_000 ms`.
 
-# API Reference
-
-## PseudoService
-
-### toAsn1Compressed
-
-Pseudonymizes a string value.
-
-```ts
-toAsn1Compressed(
-  value: string
-): Observable<string>
-```
-
-Example:
-
-```ts
-service.toAsn1Compressed("12345678901").subscribe((pseudonym) => {
-  console.log(pseudonym);
-});
-```
+When a generated pseudonym contains an expiration timestamp, the service uses that expiration to derive a safer per-entry TTL and subtracts a small safety margin before storing it.
 
 ---
 
-### fromAsn1Compressed
+## API reference
 
-Restores the original value.
+All public methods return RxJS `Observable`s.
 
-```ts
-fromAsn1Compressed(
-  pseudonym: string
-): Observable<string>
-```
+### String API
 
-Example:
+#### `toAsn1Compressed(value: string): Observable<string>`
+
+Pseudonymizes a string value and emits its ASN.1 compressed representation.
 
 ```ts
-service.fromAsn1Compressed(pseudonym).subscribe((value) => {
-  console.log(value);
-});
+pseudoService.toAsn1Compressed("12345678901").subscribe(console.log);
 ```
+
+#### `fromAsn1Compressed(pseudonym: string): Observable<string>`
+
+Identifies a pseudonym and emits the original string value.
+
+```ts
+pseudoService.fromAsn1Compressed(pseudonym).subscribe(console.log);
+```
+
+#### `toAsn1CompressedMultiple(values: string[]): Observable<string[]>`
+
+Pseudonymizes multiple string values.
+
+```ts
+pseudoService
+  .toAsn1CompressedMultiple(["123", "456", "789"])
+  .subscribe(console.log);
+```
+
+#### `fromAsn1CompressedMultiple(pseudonyms: string[]): Observable<string[]>`
+
+Identifies multiple pseudonyms.
+
+```ts
+pseudoService.fromAsn1CompressedMultiple([p1, p2]).subscribe(console.log);
+```
+
+Empty arrays are supported and emit an empty array.
 
 ---
 
-### toAsn1CompressedMultiple
+### Binary API
 
-Pseudonymizes multiple values.
+#### `byteArraytoAsn1Compressed(value: Uint8Array): Observable<string>`
 
-```ts
-toAsn1CompressedMultiple(
-  values: string[]
-): Observable<string[]>
-```
-
-Example:
-
-```ts
-service.toAsn1CompressedMultiple(["123", "456", "789"]).subscribe(console.log);
-```
-
----
-
-### fromAsn1CompressedMultiple
-
-Restores multiple values.
-
-```ts
-fromAsn1CompressedMultiple(
-  pseudonyms: string[]
-): Observable<string[]>
-```
-
----
-
-### byteArraytoAsn1Compressed
-
-Pseudonymizes binary data.
-
-```ts
-byteArraytoAsn1Compressed(
-  value: Uint8Array
-): Observable<string>
-```
-
-Example:
+Pseudonymizes binary content.
 
 ```ts
 const bytes = new Uint8Array([1, 2, 3]);
 
-service.byteArraytoAsn1Compressed(bytes).subscribe(console.log);
+pseudoService.byteArraytoAsn1Compressed(bytes).subscribe(console.log);
 ```
 
----
+#### `byteArrayFromAsn1Compressed(pseudonym: string): Observable<Uint8Array>`
 
-### byteArrayFromAsn1Compressed
-
-Restores binary data.
+Identifies a pseudonym and emits the original binary content.
 
 ```ts
-byteArrayFromAsn1Compressed(
-  pseudonym: string
-): Observable<Uint8Array>
+pseudoService.byteArrayFromAsn1Compressed(pseudonym).subscribe(console.log);
 ```
 
----
-
-### byteArraytoAsn1CompressedMultiple
+#### `byteArraytoAsn1CompressedMultiple(values: Uint8Array[]): Observable<string[]>`
 
 Pseudonymizes multiple byte arrays.
 
-```ts
-byteArraytoAsn1CompressedMultiple(
-  values: Uint8Array[]
-): Observable<string[]>
-```
+#### `byteArrayFromAsn1CompressedMultiple(pseudonyms: string[]): Observable<Uint8Array[]>`
+
+Identifies multiple binary pseudonyms and emits the original byte arrays.
 
 ---
 
-### byteArrayFromAsn1CompressedMultiple
+### Utilities
 
-Restores multiple byte arrays.
-
-```ts
-byteArrayFromAsn1CompressedMultiple(
-  pseudonyms: string[]
-): Observable<Uint8Array[]>
-```
-
----
-
-### asn1CompressedHasExpired
+#### `asn1CompressedHasExpired(pseudonym: string): Observable<boolean>`
 
 Checks whether a pseudonym has expired.
 
 ```ts
-asn1CompressedHasExpired(
-  pseudonym: string
-): Observable<boolean>
+pseudoService.asn1CompressedHasExpired(pseudonym).subscribe(console.log);
 ```
 
-Example:
+#### `onDestroy(): void`
+
+Stops the internal batch pipelines.
 
 ```ts
-service.asn1CompressedHasExpired(token).subscribe(console.log);
+pseudoService.onDestroy();
 ```
+
+Do not reuse a `PseudoService` instance after calling `onDestroy()`.
 
 ---
 
-### onDestroy
+## Angular integration
 
-Stops all internal streams and pipelines.
-
-```ts
-service.onDestroy();
-```
-
----
-
-## Complete Example
+The library itself has no Angular dependency. In Angular applications, wrap it in an injectable service.
 
 ```ts
-import { PseudoService } from "@smals-belgium/shared-pseudo-tools-js";
-
+import { inject, Injectable, OnDestroy } from "@angular/core";
 import { PseudonymisationHelper } from "@smals-belgium-shared/pseudo-helper";
+import { ConfigurationService } from "@smals/ngx-configuration-service";
+import { PseudoService as BasePseudoService } from "@smals-belgium/shared-pseudo-tools-js";
 
-const helper = new PseudonymisationHelper("https://pseudo.example.be");
+@Injectable({
+  providedIn: "root",
+})
+export class PseudoService extends BasePseudoService implements OnDestroy {
+  constructor() {
+    super(
+      inject(PseudonymisationHelper),
+      inject(ConfigurationService).getEnvironmentVariable("pseudo"),
+    );
+  }
 
-const service = new PseudoService(helper, {
-  domain: "patient",
-  curve: "secp256k1",
-  audience: "consumer",
-  bufferSize: 100,
-});
-
-service.toAsn1Compressed("12345678901").subscribe((pseudonym) => {
-  console.log(pseudonym);
-});
+  ngOnDestroy(): void {
+    super.onDestroy();
+  }
+}
 ```
 
----
+### Local library testing in Angular
 
-## Additional Documentation
-
-This library includes detailed architecture documentation describing:
-
-- Request batching
-- Request deduplication
-- Queue management
-- Cache management
-- Internal processing flows
-- Sequence diagrams
-
-See:
-
-- [ARCHITECTURE.md](./ARCHITECTURE.md)
-
----
-
-# Internal Architecture
-
-The library is built around three optimization layers.
-
-## QueueService
-
-Avoids duplicate concurrent requests.
-
-Example:
-
-```
-Request A -> patient123
-Request B -> patient123
-Request C -> patient123
-```
-
-Only one processing flow is executed.
-
-All subscribers receive the same result.
-
----
-
-## PseudoBatchService
-
-Aggregates incoming requests.
-
-Internally:
-
-```ts
-bufferTime(300);
-```
-
-is used to group requests.
-
-Example:
-
-```
-patient1
-patient2
-patient3
-```
-
-becomes:
-
-```
-[
-  "patient1",
-  "patient2",
-  "patient3"
-]
-```
-
-before sending a batch request.
-
-Maximum batch size:
-
-```ts
-50;
-```
-
----
-
-## PseudoCacheService
-
-Provides two caches.
-
-### Pseudonym Cache
-
-Stores:
-
-```
-value -> pseudonym
-```
-
-### Value Cache
-
-Stores:
-
-```
-pseudonym -> value
-```
-
-Implementation:
-
-```ts
-@isaacs/ttlcache
-```
-
-Default TTL:
-
-```ts
-10000 ms
-```
-
----
-
-# Request Lifecycle
-
-## Pseudonymization Flow
-
-```text
-Client
-  |
-  v
-PseudoService
-  |
-  +--> Cache Lookup
-  |
-  +--> Queue Service
-  |
-  +--> Batch Service
-  |
-  +--> PseudonymisationHelper
-  |
-  +--> Cache Result
-  |
-  v
-Observable Result
-```
-
----
-
-## Identification Flow
-
-```text
-Client
-  |
-  v
-PseudoService
-  |
-  +--> Cache Lookup
-  |
-  +--> Queue Service
-  |
-  +--> Batch Service
-  |
-  +--> PseudonymisationHelper
-  |
-  +--> Cache Result
-  |
-  v
-Observable Result
-```
-
----
-
-# Error Handling
-
-Errors returned by the underlying pseudonymization infrastructure are transformed into JavaScript errors.
-
-Example:
-
-```ts
-TypeError;
-```
-
-containing:
-
-```ts
-title;
-detail;
-```
-
-from the underlying `EHealthProblem`.
-
----
-
-# Performance Characteristics
-
-Built-in optimizations:
-
-- Request deduplication
-- Automatic batching
-- TTL caching
-- Reactive processing with RxJS
-- Reduced network usage
-- Lower server load
-- Improved throughput
-
----
-
-# Development
-
-## Build
+When testing a locally packed version of the library in an Angular application, clear Angular's cache after reinstalling the `.tgz` package:
 
 ```bash
+npx ng cache clean
+```
+
+Then restart `ng serve` completely.
+
+---
+
+## Error handling
+
+The underlying helper can return `EHealthProblem` objects. The library converts these values into standard JavaScript `Error` instances with the original detail stored as `cause` when available.
+
+Batch calls also error explicitly when a batch handler does not return a result for every requested item. This prevents consumers from receiving observables that complete silently without a value.
+
+---
+
+## Internal behavior
+
+### Batching
+
+The internal batch service buffers requests for up to `300 ms` or until `10` unique items are collected, whichever comes first.
+
+```ts
+bufferTime(300, undefined, 10);
+```
+
+### Deduplication
+
+Identical in-flight requests share the same pending subject. Once the batch is resolved, the pending subject is removed so a later call can start a fresh operation if the value is no longer available from the TTL cache.
+
+### Caching
+
+The service keeps two TTL caches:
+
+- `value -> pseudonym`
+- `pseudonym -> value`
+
+String values and byte-array values use separate internal cache namespaces to avoid collisions between plain strings and Base64-encoded binary data.
+
+---
+
+## Development
+
+```bash
+npm install
+npm test
+npm run test:coverage
 npm run build
 ```
 
-## Test
-
-```bash
-npm test
-```
-
-## Coverage
-
-```bash
-npm run test:coverage
-```
+The test suite uses Jest and is framework-agnostic. Keep fake timers local to tests that need them, such as batching or queue timing tests. Avoid enabling fake timers globally for TTL cache tests.
 
 ---
 
-## Documentation
+## Additional documentation
 
-- 📖 [Architecture](./ARCHITECTURE.md)
-- 📝 [Changelog](./CHANGELOG.md)
+- [Architecture](./ARCHITECTURE.MD)
+- [Changelog](./CHANGELOG.md)
+- [NPM guide](./NPM.md)
 
 ---
 
-# License
+## License
 
 [Smals Web Components and Libraries (SWCL)](./LICENSE.md)
 

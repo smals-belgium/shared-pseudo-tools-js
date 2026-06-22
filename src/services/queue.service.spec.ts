@@ -1,52 +1,101 @@
+import { delay, of, throwError } from "rxjs";
 import { QueueService } from "./queue.service";
-import { Subject } from "rxjs";
 
 describe("QueueService (safe mode)", () => {
   let service: QueueService;
 
   beforeEach(() => {
+    jest.useFakeTimers();
     service = new QueueService();
   });
 
-  it("should create state", () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it("creates a queue state with the provided initial value", () => {
+    const queue$ = service.create<string[]>(["existing"]);
+
+    expect(queue$.value).toEqual(["existing"]);
+  });
+
+  it("serializes operations sharing the same key", () => {
     const queue$ = service.create<string[]>([]);
+    const results: string[] = [];
+
+    service
+      .queue(queue$, "same", of("first").pipe(delay(50)))
+      .subscribe((value) => {
+        results.push(value);
+      });
+
+    service.queue(queue$, "same", of("second")).subscribe((value) => {
+      results.push(value);
+    });
+
+    expect(queue$.value).toEqual(["same"]);
+    expect(results).toEqual([]);
+
+    jest.advanceTimersByTime(49);
+    expect(results).toEqual([]);
+    expect(queue$.value).toEqual(["same"]);
+
+    jest.advanceTimersByTime(1);
+    expect(results).toEqual(["first", "second"]);
     expect(queue$.value).toEqual([]);
   });
 
-  it("should emit value from observable", (done) => {
+  it("allows operations with different keys to run independently", () => {
     const queue$ = service.create<string[]>([]);
-    const task$ = new Subject<string>();
+    const results: string[] = [];
 
-    service.queue(queue$, "k1", task$).subscribe({
-      next: (v) => {
-        expect(v).toBe("a");
-      },
-      complete: () => done(),
-      error: done.fail,
+    service
+      .queue(queue$, "slow", of("slow").pipe(delay(50)))
+      .subscribe((value) => {
+        results.push(value);
+      });
+
+    service.queue(queue$, "fast", of("fast")).subscribe((value) => {
+      results.push(value);
     });
 
-    task$.next("a");
-    task$.complete();
+    expect(results).toEqual(["fast"]);
+    expect(queue$.value).toEqual(["slow"]);
+
+    jest.advanceTimersByTime(50);
+    expect(results).toEqual(["fast", "slow"]);
+    expect(queue$.value).toEqual([]);
   });
 
-  it("should update queue state on execution", (done) => {
+  it("releases the key when the operation errors", () => {
     const queue$ = service.create<string[]>([]);
-    const task$ = new Subject<string>();
+    const errors: unknown[] = [];
 
-    let sawActive = false;
+    service
+      .queue(
+        queue$,
+        "same",
+        throwError(() => new Error("boom")),
+      )
+      .subscribe({
+        error: (error) => errors.push(error),
+      });
 
-    queue$.subscribe((v) => {
-      if (v.includes("k1")) sawActive = true;
-    });
+    expect(errors).toHaveLength(1);
+    expect(queue$.value).toEqual([]);
+  });
 
-    service.queue(queue$, "k1", task$).subscribe({
-      complete: () => {
-        expect(sawActive).toBe(true);
-        done();
-      },
-    });
+  it("releases the key when the subscription is cancelled", () => {
+    const queue$ = service.create<string[]>([]);
 
-    task$.next("ok");
-    task$.complete();
+    const subscription = service
+      .queue(queue$, "same", of("value").pipe(delay(50)))
+      .subscribe();
+
+    expect(queue$.value).toEqual(["same"]);
+
+    subscription.unsubscribe();
+
+    expect(queue$.value).toEqual([]);
   });
 });

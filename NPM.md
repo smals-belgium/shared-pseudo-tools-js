@@ -1,24 +1,31 @@
-# @smals-belgium/shared-pseudo-tools-js
+# NPM package guide
 
-Reactive pseudonymization toolkit built on top of `@smals-belgium-shared/pseudo-helper`.
-
-It provides a high-level API for pseudonymization with built-in optimizations:
-
-- request batching
-- automatic deduplication
-- in-memory TTL caching
-- RxJS-based reactive API
-- binary (Uint8Array) support
+This document describes how to build, test, package and consume `@smals-belgium/shared-pseudo-tools-js`.
 
 ---
 
-## Installation
+## Package purpose
+
+`@smals-belgium/shared-pseudo-tools-js` is a framework-agnostic TypeScript/RxJS wrapper around `@smals-belgium-shared/pseudo-helper`.
+
+It provides:
+
+- pseudonymization and identification APIs
+- automatic batching
+- in-flight request deduplication
+- TTL caching
+- `Uint8Array` support
+- Jest-tested framework-agnostic services
+
+---
+
+## Install from the registry
 
 ```bash
 npm install @smals-belgium/shared-pseudo-tools-js
 ```
 
-### Peer dependency
+Install the underlying helper expected by the package:
 
 ```bash
 npm install @smals-belgium-shared/pseudo-helper
@@ -26,183 +33,166 @@ npm install @smals-belgium-shared/pseudo-helper
 
 ---
 
-## Quick start
+## Local development workflow
 
-### Create helper
+### Install dependencies
 
-```ts
-import { PseudonymisationHelper } from "@smals-belgium-shared/pseudo-helper";
-import { PseudoService } from "@smals-belgium/shared-pseudo-tools-js";
-
-const helper = new PseudonymisationHelper("https://your-endpoint");
+```bash
+npm install
 ```
 
-### Create service
+### Run tests
+
+```bash
+npm test
+```
+
+### Run coverage
+
+```bash
+npm run test:coverage
+```
+
+### Build
+
+```bash
+npm run build
+```
+
+---
+
+## Local package testing with `npm pack`
+
+Use `npm pack` to test the exact package contents that would be published.
+
+```bash
+npm run build
+npm pack
+```
+
+This creates an archive such as:
+
+```text
+smals-belgium-shared-pseudo-tools-js-0.0.1.tgz
+```
+
+Install it in a consuming project:
+
+```bash
+npm install ../path/to/smals-belgium-shared-pseudo-tools-js-0.0.1.tgz
+```
+
+### Angular consuming applications
+
+When testing a local `.tgz` package in Angular, stop the dev server, reinstall the package, clear Angular's cache and restart the dev server:
+
+```bash
+npm install ../path/to/smals-belgium-shared-pseudo-tools-js-0.0.1.tgz
+npx ng cache clean
+npm start
+```
+
+If a change appears to have no effect, verify that the compiled file inside `node_modules/@smals-belgium/shared-pseudo-tools-js` contains the expected change, then clear Angular's cache again.
+
+---
+
+## Pre-publish checklist
+
+Before publishing a new version:
+
+```bash
+npm test
+npm run test:coverage
+npm run build
+npm pack --dry-run
+```
+
+Check that the package contains only the expected build artifacts and documentation.
+
+Recommended checks:
+
+- no debug `console.warn` / `console.error`
+- no framework-specific imports in the library services
+- no Angular dependency in framework-agnostic code
+- tests pass with Jest
+- README examples still match the public API
+- `CHANGELOG.md` contains the release notes
+- package version has been bumped if publishing a new version
+
+---
+
+## Publishing
+
+Use your configured Smals/npm registry and access policy.
+
+```bash
+npm publish
+```
+
+For scoped packages, use the appropriate access level required by your registry setup.
+
+```bash
+npm publish --access restricted
+```
+
+or, if the package is intentionally public:
+
+```bash
+npm publish --access public
+```
+
+---
+
+## Recommended dependency model
+
+The package is framework-agnostic. Angular should not be a dependency of this library.
+
+The consuming application must provide the `PseudonymisationHelper` instance passed to `PseudoService`.
+
+Recommended package expectations:
+
+- `@smals-belgium-shared/pseudo-helper` must be available to the consumer
+- RxJS must be compatible with the library build
+- Angular-specific integration should live in the consuming application, not inside this package
+
+---
+
+## Minimal usage
 
 ```ts
+import { PseudoService } from "@smals-belgium/shared-pseudo-tools-js";
+import { PseudonymisationHelper } from "@smals-belgium-shared/pseudo-helper";
+
+const helper = new PseudonymisationHelper("https://pseudo.example.be");
+
 const service = new PseudoService(helper, {
   domain: "patient",
   curve: "secp256k1",
   audience: "consumer",
   bufferSize: 100,
 });
-```
 
----
-
-## Basic usage
-
-### Pseudonymize a value
-
-```ts
 service.toAsn1Compressed("12345678901").subscribe(console.log);
 ```
 
-### Restore original value
-
-```ts
-service.fromAsn1Compressed(pseudonym).subscribe(console.log);
-```
-
 ---
 
-## Batch operations
+## Troubleshooting
 
-```ts
-service.toAsn1CompressedMultiple(["123", "456", "789"]).subscribe(console.log);
+### Changes are visible in `node_modules` but not at runtime
 
-service.fromAsn1CompressedMultiple(["p1", "p2"]).subscribe(console.log);
+In Angular consuming projects, the dependency optimizer/cache can serve a previous build. Stop the dev server and run:
+
+```bash
+npx ng cache clean
 ```
 
----
+Then restart the application.
 
-## Binary support
+### TTL cache tests are flaky
 
-```ts
-const bytes = new Uint8Array([1, 2, 3]);
+Do not enable Jest fake timers globally. Keep fake timers local to specs that test RxJS timing. TTL cache tests should either mock `@isaacs/ttlcache` or avoid testing the internals of the external dependency.
 
-service.byteArraytoAsn1Compressed(bytes).subscribe(console.log);
+### Observables stay pending in a consuming application
 
-service.byteArrayFromAsn1Compressed(pseudonym).subscribe(console.log);
-```
-
----
-
-## Configuration
-
-```ts
-interface PseudoConfig {
-  domain?: string;
-  curve?: string;
-  audience?: string;
-  bufferSize?: number;
-  cache?: {
-    values?: { ttl: number };
-    pseudonyms?: { ttl: number };
-  };
-}
-```
-
-### Example
-
-```ts
-const config = {
-  domain: "patient",
-  curve: "secp256k1",
-  audience: "consumer",
-  bufferSize: 100,
-  cache: {
-    values: { ttl: 300000 },
-    pseudonyms: { ttl: 300000 },
-  },
-};
-```
-
----
-
-## Angular integration
-
-### Class extension
-
-```ts
-import { inject, Injectable, OnDestroy } from "@angular/core";
-import { PseudonymisationHelper } from "@smals-belgium-shared/pseudo-helper";
-import { ConfigurationService } from "@smals/ngx-configuration-service";
-import { PseudoService as BasePseudoService } from "@smals-belgium/shared-pseudo-tools-js";
-
-@Injectable({
-  providedIn: "root",
-})
-export class PseudoService extends BasePseudoService implements OnDestroy {
-  constructor() {
-    super(
-      inject(PseudonymisationHelper),
-      inject(ConfigurationService).getEnvironmentVariable("pseudo"),
-    );
-  }
-
-  ngOnDestroy(): void {
-    super.onDestroy();
-  }
-}
-```
-
-### Standalone provider
-
-```ts
-import { Provider, inject } from "@angular/core";
-import { PseudonymisationHelper } from "@smals-belgium-shared/pseudo-helper";
-import { ConfigurationService } from "@smals/ngx-configuration-service";
-import { PseudoService } from "@smals-belgium/shared-pseudo-tools-js";
-
-export const PSEUDO_SERVICE_PROVIDER: Provider = {
-  provide: PseudoService,
-  useFactory: () =>
-    new PseudoService(
-      inject(PseudonymisationHelper),
-      inject(ConfigurationService).getEnvironmentVariable("pseudo"),
-    ),
-};
-```
-
----
-
-## API overview
-
-All methods return `Observable`.
-
-### String API
-
-- `toAsn1Compressed(value: string): Observable<string>`
-- `fromAsn1Compressed(pseudonym: string): Observable<string>`
-- `toAsn1CompressedMultiple(values: string[]): Observable<string[]>`
-- `fromAsn1CompressedMultiple(values: string[]): Observable<string[]>`
-
-### Binary API
-
-- `byteArraytoAsn1Compressed(value: Uint8Array): Observable<string>`
-- `byteArrayFromAsn1Compressed(pseudonym: string): Observable<Uint8Array>`
-- `byteArraytoAsn1CompressedMultiple(values: Uint8Array[]): Observable<string[]>`
-- `byteArrayFromAsn1CompressedMultiple(values: Uint8Array[]): Observable<Uint8Array[]>`
-
-### Utilities
-
-- `asn1CompressedHasExpired(pseudonym: string): Observable<boolean>`
-- `onDestroy(): void`
-
----
-
-## Features
-
-- batching of requests
-- automatic deduplication
-- TTL-based caching
-- RxJS reactive streams
-- binary support
-- optimized backend usage
-
----
-
-## License
-
-Smals Web Components and Libraries (SWCL)
+Check that the package version actually loaded by the app is the rebuilt version. Then verify that the batch service does not keep completed observables in a persistent internal cache. The stable implementation deduplicates only in-flight subjects and removes them after dispatch.

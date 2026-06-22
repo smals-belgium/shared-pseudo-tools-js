@@ -9,15 +9,21 @@ import { PseudoConfig } from "../interfaces/pseudo-config.interface";
  * - Value cache: maps pseudonyms to identified values.
  * - Pseudonym cache: maps clear values to pseudonyms.
  *
- * Cache expiration can be configured globally through {@link PseudoConfig}
- * or overridden per entry.
+ * Cache expiration can be configured globally through {@link PseudoConfig} or
+ * overridden per entry. Entry-specific TTLs are typically derived from the
+ * pseudonym transit expiration metadata.
  */
 export class PseudoCacheService {
-  private static readonly DEFAULT_TTL_MS = 10_000;
-
+  /** Cache configuration provided by the consumer application. */
   private readonly config: PseudoConfig["cache"];
 
+  /** Default TTL used when neither the entry nor the configuration provides one. */
+  private readonly DEFAULT_TTL_MS = 10_000;
+
+  /** Cache mapping original values to pseudonyms. */
   private readonly pseudonymCache: TTLCache<string, PseudonymInTransit>;
+
+  /** Cache mapping pseudonyms to identified values. */
   private readonly valueCache: TTLCache<string, Value>;
 
   /**
@@ -28,55 +34,14 @@ export class PseudoCacheService {
   constructor(configuration: PseudoConfig["cache"]) {
     this.config = configuration;
 
-    this.pseudonymCache = new TTLCache<string, PseudonymInTransit>(
-      this.config?.pseudonyms ?? {},
-    );
+    this.pseudonymCache = new TTLCache<string, PseudonymInTransit>({
+      checkAgeOnGet: true,
+      ...this.config?.pseudonyms,
+    });
 
     this.valueCache = new TTLCache<string, Value>({
       checkAgeOnGet: true,
       ...this.config?.values,
-    });
-  }
-
-  /**
-   * Resolves the effective TTL for a cache entry.
-   *
-   * Resolution order:
-   * 1. Entry-specific TTL
-   * 2. Cache-level configured TTL
-   * 3. Default TTL
-   *
-   * @param entryTTL TTL provided for the current cache entry.
-   * @param cacheTTL TTL configured for the cache instance.
-   * @returns The effective TTL in milliseconds.
-   */
-  private resolveTtl(
-    entryTTL: number | undefined,
-    cacheTTL: number | undefined,
-  ): number {
-    return entryTTL ?? cacheTTL ?? PseudoCacheService.DEFAULT_TTL_MS;
-  }
-
-  /**
-   * Stores a value in the specified cache using the resolved TTL.
-   *
-   * @typeParam K Cache key type.
-   * @typeParam V Cache value type.
-   * @param cache Target cache instance.
-   * @param key Cache key.
-   * @param value Value to store.
-   * @param entryTTL Optional entry-specific TTL.
-   * @param cacheTTL Cache-level TTL configuration.
-   */
-  private setWithTtl<K, V>(
-    cache: TTLCache<K, V>,
-    key: K,
-    value: V,
-    entryTTL: number | undefined,
-    cacheTTL: number | undefined,
-  ): void {
-    cache.set(key, value, {
-      ttl: this.resolveTtl(entryTTL, cacheTTL),
     });
   }
 
@@ -88,13 +53,13 @@ export class PseudoCacheService {
    * @param cacheTTL Optional entry-specific TTL in milliseconds.
    */
   cacheValue(pseudonym: string, value: Value, cacheTTL?: number): void {
-    this.setWithTtl(
-      this.valueCache,
-      pseudonym,
-      value,
-      cacheTTL,
-      this.config?.values?.ttl,
-    );
+    const ttl = this.resolveTtl(cacheTTL, this.config?.values?.ttl);
+
+    if (ttl <= 0) {
+      return;
+    }
+
+    this.valueCache.set(pseudonym, value, { ttl });
   }
 
   /**
@@ -119,13 +84,13 @@ export class PseudoCacheService {
     pseudonym: PseudonymInTransit,
     cacheTTL?: number,
   ): void {
-    this.setWithTtl(
-      this.pseudonymCache,
-      value,
-      pseudonym,
-      cacheTTL,
-      this.config?.pseudonyms?.ttl,
-    );
+    const ttl = this.resolveTtl(cacheTTL, this.config?.pseudonyms?.ttl);
+
+    if (ttl <= 0) {
+      return;
+    }
+
+    this.pseudonymCache.set(value, pseudonym, { ttl });
   }
 
   /**
@@ -136,5 +101,38 @@ export class PseudoCacheService {
    */
   getPseudonym(value: string): PseudonymInTransit | undefined {
     return this.pseudonymCache.get(value);
+  }
+
+  /**
+   * Resolves the effective TTL for a cache entry.
+   *
+   * Priority order:
+   * 1. Entry-specific TTL, including 0.
+   * 2. Cache configuration TTL.
+   * 3. Default TTL.
+   *
+   * @param cacheTTL TTL provided for the current entry.
+   * @param configTTL TTL configured for the cache.
+   * @returns TTL value in milliseconds.
+   */
+  private resolveTtl(
+    cacheTTL: number | undefined,
+    configTTL: number | undefined,
+  ): number {
+    return (
+      this.normalizeTtl(cacheTTL) ??
+      this.normalizeTtl(configTTL) ??
+      this.DEFAULT_TTL_MS
+    );
+  }
+
+  /**
+   * Normalizes invalid TTL values to undefined.
+   *
+   * @param ttl TTL candidate.
+   * @returns The TTL when it is a finite number, otherwise undefined.
+   */
+  private normalizeTtl(ttl: number | undefined): number | undefined {
+    return typeof ttl === "number" && Number.isFinite(ttl) ? ttl : undefined;
   }
 }

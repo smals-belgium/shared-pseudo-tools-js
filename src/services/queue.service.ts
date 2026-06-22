@@ -1,29 +1,23 @@
 import {
   BehaviorSubject,
-  Observable,
-  Subject,
-  of,
+  defer,
+  filter,
   finalize,
-  exhaustMap,
-  concatMap,
+  map,
+  Observable,
+  switchMap,
+  take,
+  tap,
 } from "rxjs";
 
 /**
  * Lightweight in-memory queue service that serializes execution per key.
  *
- * Each key gets its own internal mutex queue so that all operations
- * associated with the same key are executed sequentially.
+ * Requests sharing the same key are serialized and only allowed to execute once
+ * the previous operation for that key has completed or errored. Requests with
+ * different keys can continue independently.
  */
 export class QueueService {
-  /**
-   * Internal map of per-key execution queues.
-   * Each queue serializes jobs using `concatMap`.
-   */
-  private readonly queues = new Map<
-    string,
-    Subject<() => Observable<unknown>>
-  >();
-
   /**
    * Creates a new reactive queue state container.
    *
@@ -41,71 +35,73 @@ export class QueueService {
    * Each key has a dedicated Subject that serializes execution using `concatMap`,
    * ensuring only one job runs at a time per key.
    *
-   * @param key - Unique identifier for the queue partition.
-   * @returns A Subject that accepts execution jobs.
-   */
-  private getQueue(key: string): Subject<() => Observable<unknown>> {
-    if (!this.queues.has(key)) {
-      const q = new Subject<() => Observable<unknown>>();
-
-      // Serialize all jobs for this key
-      q.pipe(concatMap((job) => job())).subscribe();
-
-      this.queues.set(key, q);
-    }
-
-    return this.queues.get(key)!;
-  }
-
-  /**
-   * Enqueues and executes an observable task in a per-key serialized queue.
+   * If the key is already being processed, execution waits until it is released.
+   * Once the operation completes or errors, the key is automatically removed
+   * from the queue.
    *
-   * Execution rules:
-   * - Tasks with the same key are executed sequentially.
-   * - Tasks with different keys run independently.
-   * - The provided BehaviorSubject is updated when a task starts and ends.
-   *
-   * @typeParam T - Type emitted by the handled observable.
-   * @param queue$ - Shared state tracking active keys.
-   * @param key - Key used to serialize execution.
-   * @param handle - Observable representing the asynchronous task.
-   * @returns An Observable that completes when the task completes.
+   * @param queue$ Queue state containing currently processed keys.
+   * @param key Unique identifier used for synchronization.
+   * @param handle Observable operation to execute.
+   * @returns Observable emitting the result of the provided operation.
    */
   queue<T = unknown>(
     queue$: BehaviorSubject<string[]>,
     key: string,
     handle: Observable<T>,
   ): Observable<T> {
-    return of(null).pipe(
-      exhaustMap(() => {
-        const q = this.getQueue(key);
-
-        return new Observable<T>((subscriber) => {
-          // Enqueue job into per-key mutex queue
-          q.next(() => {
-            return new Observable<T>((innerSub) => {
-              // Mark key as active
-              queue$.next([...queue$.value, key]);
-
-              handle
-                .pipe(
-                  finalize(() => {
-                    // Remove key when execution ends
-                    queue$.next(queue$.value.filter((k) => k !== key));
-                  }),
-                )
-                .subscribe({
-                  next: (value) => innerSub.next(value),
-                  error: (err) => innerSub.error(err),
-                  complete: () => {
-                    innerSub.complete();
-                    subscriber.complete();
-                  },
-                });
-            });
-          });
-        });
-      }),
+    return defer(() =>
+      this.waitForKey(queue$, key).pipe(
+        tap(() => this.lockKey(queue$, key)),
+        switchMap(() =>
+          handle.pipe(finalize(() => this.releaseKey(queue$, key))),
+        ),
+      ),
     );
+  }
+
+  /**
+   * Waits until a key is no longer present in the queue.
+   *
+   * @param queue$ Queue state containing currently processed keys.
+   * @param key Key to wait for.
+   * @returns Observable that emits once the key becomes available.
+   */
+  private waitForKey(
+    queue$: BehaviorSubject<string[]>,
+    key: string,
+  ): Observable<void> {
+    return queue$.pipe(
+      filter((keys) => !keys.includes(key)),
+      take(1),
+      map(() => undefined),
+    );
+  }
+
+  /**
+   * Marks a key as currently being processed.
+   *
+   * @param queue$ Queue state containing currently processed keys.
+   * @param key Key to lock.
+   */
+  private lockKey(queue$: BehaviorSubject<string[]>, key: string): void {
+    const current = queue$.value;
+
+    if (!current.includes(key)) {
+      queue$.next([...current, key]);
+    }
+  }
+
+  /**
+   * Releases a key after its operation completes or errors.
+   *
+   * @param queue$ Queue state containing currently processed keys.
+   * @param key Key to release.
+   */
+  private releaseKey(queue$: BehaviorSubject<string[]>, key: string): void {
+    const current = queue$.value;
+
+    if (current.includes(key)) {
+      queue$.next(current.filter((item) => item !== key));
+    }
   }
 }
