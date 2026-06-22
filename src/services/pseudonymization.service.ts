@@ -91,7 +91,7 @@ export class PseudoService {
       "identify",
       this.batchService.initBatch<Value>(
         "identify",
-        (items) => this.identifyMultipleValues(items),
+        (items) => this.fromAsn1CompressedMultipleValues(items),
         this.destroy$,
       ),
     );
@@ -109,9 +109,7 @@ export class PseudoService {
       "byteArrayIdentify",
       this.batchService.initBatch<Value>(
         "byteArrayIdentify",
-        // byteArrayFromAsn1CompressedMultipleValues was identical to
-        // fromAsn1CompressedMultipleValues — reuse the shared implementation.
-        (items) => this.identifyMultipleValues(items),
+        (items) => this.byteArrayFromAsn1CompressedMultipleValues(items),
         this.destroy$,
       ),
     );
